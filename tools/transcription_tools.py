@@ -1072,23 +1072,41 @@ def _load_local_whisper_model(model_name: str):
     (``libcublas.so.12`` / ``libcudnn*``) isn't installed — common on WSL2
     without CUDA-on-WSL, headless servers, and CPU-only developer machines.
     On those hosts the load itself sometimes succeeds and the dlopen failure
-    only surfaces at first ``transcribe()`` call.
+    only surfaces at first ``transcribe()`` call as a SIGBUS killing the process.
 
-    We try ``auto`` first (fast CUDA path when it works), and on any CUDA
-    library load failure fall back to CPU + int8.
+    SAFETY: Check for actual CUDA availability first. On CPU-only machines,
+    ``device="auto"`` can cause SIGBUS during transcription because ctranslate2
+    may detect partial/broken CUDA support that fails at first GPU memory access.
+    We only use ``auto`` when PyTorch confirms CUDA is available.
     """
     from faster_whisper import WhisperModel
+
+    # Only try GPU if PyTorch confirms CUDA is actually available
+    _try_cuda = False
     try:
-        return WhisperModel(model_name, device="auto", compute_type="auto")
-    except Exception as exc:
-        if not _looks_like_cuda_lib_error(exc):
-            raise
-        logger.warning(
-            "faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
-            "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.",
-            exc,
+        import torch
+        _try_cuda = torch.cuda.is_available()
+    except Exception:
+        _try_cuda = False
+
+    if _try_cuda:
+        try:
+            return WhisperModel(model_name, device="auto", compute_type="auto")
+        except Exception as exc:
+            if not _looks_like_cuda_lib_error(exc):
+                raise
+            logger.warning(
+                "faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
+                "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.",
+                exc,
+            )
+    else:
+        logger.info(
+            "CUDA not available — loading faster-whisper on CPU (int8). "
+            "Set CUDA_VISIBLE_DEVICES and install NVIDIA runtime for GPU acceleration."
         )
-        return WhisperModel(model_name, device="cpu", compute_type="int8")
+
+    return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
 def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
